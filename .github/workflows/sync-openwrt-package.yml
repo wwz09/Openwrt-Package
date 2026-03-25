@@ -78,8 +78,18 @@ jobs:
           find . -type d -not -path "./.git" -not -path "./.github" -not -path "./.git/*" -not -path "./.github/*" -empty -delete
           echo "目录清理完成"
           
-          # 克隆目标仓库内容
-          git clone --depth 1 $TARGET_REPO .
+          # 克隆目标仓库内容到临时目录，然后移动到当前目录
+          TEMP_CLONE_DIR="temp_clone"
+          rm -rf $TEMP_CLONE_DIR || true
+          git clone --depth 1 $TARGET_REPO $TEMP_CLONE_DIR
+          
+          # 将临时目录中的内容移动到当前目录
+          mv $TEMP_CLONE_DIR/* . 2>/dev/null || true
+          mv $TEMP_CLONE_DIR/.* . 2>/dev/null || true
+          
+          # 清理临时目录
+          rm -rf $TEMP_CLONE_DIR || true
+          echo "仓库内容同步完成"
           
           # 保留.git和.github目录
           git checkout HEAD -- .gitignore || true
