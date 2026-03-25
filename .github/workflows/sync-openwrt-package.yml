@@ -72,8 +72,11 @@ jobs:
           TARGET_BRANCH="main"
           
           # 清空当前目录除了.git和.github的内容
-          find . -type f -not -path "./.git/*" -not -path "./.github/*" -not -name ".sync_history" -delete
-          find . -type d -not -path "./.git" -not -path "./.github" -not -path "./.git/*" -not -path "./.github/*" -delete
+          # 先删除所有文件
+          find . -type f -not -path "./.git/*" -not -path "./.github/*" -not -name ".sync_history" -exec rm -f {} \;
+          # 再删除所有空目录
+          find . -type d -not -path "./.git" -not -path "./.github" -not -path "./.git/*" -not -path "./.github/*" -empty -delete
+          echo "目录清理完成"
           
           # 克隆目标仓库内容
           git clone --depth 1 $TARGET_REPO .
@@ -113,7 +116,9 @@ jobs:
       # 清理临时文件
       - name: 清理临时文件
         run: |
-          rm -rf temp_target_repo || true
+          # 使用强制递归删除整个临时目录
+          rm -rf temp_target_repo 2>/dev/null || true
+          echo "临时目录清理完成"
 
 # 工作流配置说明：
 # 1. 触发方式：每周自动执行一次，同时支持手动触发
