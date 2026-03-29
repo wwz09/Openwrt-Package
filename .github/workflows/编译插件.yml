@@ -1,0 +1,408 @@
+name: 编译插件
+
+on:
+  # main分支上的push事件触发
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.github/**'
+      - 'README.md'
+      - '*.md'
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: '发布版本号 (留空则自动生成)'
+        required: false
+        default: ''
+      release_notes:
+        description: '发布说明'
+        required: false
+        default: '自动编译的插件包'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  # 编译环境配置
+  OPENWRT_SDK_URL: 'https://downloads.openwrt.org/releases/23.05.3/targets/x86/64/openwrt-sdk-23.05.3-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz'
+  SDK_DIR: 'openwrt-sdk'
+  FEEDS_CONF: 'feeds.conf.default'
+
+jobs:
+  # 编译准备和版本号生成
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      short_sha: ${{ steps.version.outputs.short_sha }}
+      release_name: ${{ steps.version.outputs.release_name }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 生成版本号
+        id: version
+        run: |
+          # 获取短SHA
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          
+          # 检查是否手动输入了版本号
+          if [ -n "${{ github.event.inputs.release_version }}" ]; then
+            VERSION="${{ github.event.inputs.release_version }}"
+          else
+            # 基于语义化版本控制和提交SHA生成版本号
+            # 格式: v1.0.0-<commit_count>-<short_sha>
+            COMMIT_COUNT=$(git rev-list --count HEAD)
+            VERSION="v1.0.${COMMIT_COUNT}-${SHORT_SHA}"
+          fi
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "release_name=插件编译包 $VERSION" >> $GITHUB_OUTPUT
+          
+          echo "生成的版本号: $VERSION"
+          echo "发布名称: 插件编译包 $VERSION"
+          echo "短SHA: $SHORT_SHA"
+
+  # 编译插件
+  build:
+    runs-on: ubuntu-latest
+    needs: prepare
+    timeout-minutes: 120
+    
+    strategy:
+      matrix:
+        arch:
+          - x86_64
+          - aarch64_generic
+          - arm_cortex-a7
+      fail-fast: false
+    
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 设置编译环境
+        run: |
+          echo "开始设置编译环境..."
+          
+          # 更新软件包列表
+          sudo apt-get update
+          
+          # 安装编译依赖
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            flex \
+            bison \
+            g++ \
+            gawk \
+            gcc-multilib \
+            g++-multilib \
+            gettext \
+            git \
+            libncurses5-dev \
+            libssl-dev \
+            python3-distutils \
+            rsync \
+            unzip \
+            zlib1g-dev \
+            file \
+            wget \
+            curl \
+            time \
+            subversion \
+            quilt \
+            libelf-dev \
+            ecj \
+            fastjar \
+            java-propose-classpath
+          
+          echo "编译环境设置完成"
+
+      - name: 下载并配置OpenWrt SDK
+        run: |
+          echo "下载OpenWrt SDK..."
+          
+          # 根据架构选择SDK
+          case "${{ matrix.arch }}" in
+            x86_64)
+              SDK_URL="https://downloads.openwrt.org/releases/23.05.3/targets/x86/64/openwrt-sdk-23.05.3-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
+              ;;
+            aarch64_generic)
+              SDK_URL="https://downloads.openwrt.org/releases/23.05.3/targets/rockchip/armv8/openwrt-sdk-23.05.3-rockchip-armv8_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
+              ;;
+            arm_cortex-a7)
+              SDK_URL="https://downloads.openwrt.org/releases/23.05.3/targets/sunxi/cortexa7/openwrt-sdk-23.05.3-sunxi-cortexa7_gcc-12.3.0_musl_eabi.Linux-x86_64.tar.xz"
+              ;;
+            *)
+              echo "不支持的架构: ${{ matrix.arch }}"
+              exit 1
+              ;;
+          esac
+          
+          # 下载SDK
+          wget -q --show-progress "$SDK_URL" -O sdk.tar.xz
+          
+          # 解压SDK
+          echo "解压SDK..."
+          tar -xf sdk.tar.xz
+          mv openwrt-sdk-* ${{ env.SDK_DIR }}
+          rm sdk.tar.xz
+          
+          echo "SDK配置完成"
+
+      - name: 配置feeds
+        run: |
+          echo "配置feeds..."
+          
+          cd ${{ env.SDK_DIR }}
+          
+          # 备份原始feeds配置
+          cp feeds.conf.default feeds.conf.default.backup
+          
+          # 添加当前仓库到feeds
+          echo "src-link custom $GITHUB_WORKSPACE" >> feeds.conf.default
+          
+          # 更新并安装feeds
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          
+          echo "Feeds配置完成"
+
+      - name: 配置编译选项
+        run: |
+          echo "配置编译选项..."
+          
+          cd ${{ env.SDK_DIR }}
+          
+          # 创建配置文件
+          cat > .config << 'EOF'
+          CONFIG_DEVEL=y
+          CONFIG_BUILD_LOG=y
+          CONFIG_CCACHE=y
+          CONFIG_PACKAGE_luci-app-argon-config=y
+          CONFIG_PACKAGE_luci-app-ddns-go=y
+          CONFIG_PACKAGE_luci-app-openclash=y
+          CONFIG_PACKAGE_luci-app-smartdns=y
+          CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_luci-app-homeproxy=y
+          EOF
+          
+          # 使用defconfig生成完整配置
+          make defconfig
+          
+          echo "编译选项配置完成"
+
+      - name: 编译插件
+        id: compile
+        run: |
+          echo "开始编译插件..."
+          
+          cd ${{ env.SDK_DIR }}
+          
+          # 开始编译，使用多线程加速
+          make package/compile -j$(nproc) V=s 2>&1 | tee build.log
+          
+          # 检查编译结果
+          if [ ${PIPESTATUS[0]} -eq 0 ]; then
+            echo "编译成功"
+            echo "compile_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "编译失败"
+            echo "compile_status=failure" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: 收集编译产物
+        run: |
+          echo "收集编译产物..."
+          
+          # 创建输出目录
+          mkdir -p $GITHUB_WORKSPACE/output/${{ matrix.arch }}
+          
+          # 复制编译生成的ipk文件
+          find ${{ env.SDK_DIR }}/bin/packages -name "*.ipk" -type f \
+            -exec cp {} $GITHUB_WORKSPACE/output/${{ matrix.arch }}/ \;
+          
+          # 复制编译日志
+          cp ${{ env.SDK_DIR }}/build.log $GITHUB_WORKSPACE/output/${{ matrix.arch }}/ 2>/dev/null || true
+          
+          # 显示收集的文件
+          echo "收集的编译产物:"
+          ls -la $GITHUB_WORKSPACE/output/${{ matrix.arch }}/
+          
+          # 统计文件数量
+          IPK_COUNT=$(find $GITHUB_WORKSPACE/output/${{ matrix.arch }}/ -name "*.ipk" | wc -l)
+          echo "编译生成的ipk文件数量: $IPK_COUNT"
+
+      - name: 打包编译产物
+        run: |
+          echo "打包编译产物..."
+          
+          cd $GITHUB_WORKSPACE/output
+          
+          # 创建压缩包
+          ARCHIVE_NAME="packages-${{ matrix.arch }}-${{ needs.prepare.outputs.version }}"
+          tar -czf "${ARCHIVE_NAME}.tar.gz" -C "${{ matrix.arch }}" .
+          
+          # 创建SHA256校验文件
+          sha256sum "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
+          
+          echo "打包完成: ${ARCHIVE_NAME}.tar.gz"
+          ls -lh "${ARCHIVE_NAME}.tar.gz"
+
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.arch }}
+          path: |
+            output/packages-${{ matrix.arch }}-${{ needs.prepare.outputs.version }}.tar.gz
+            output/packages-${{ matrix.arch }}-${{ needs.prepare.outputs.version }}.tar.gz.sha256
+          retention-days: 30
+
+  # 创建GitHub Release
+  release:
+    runs-on: ubuntu-latest
+    needs: [prepare, build]
+    if: always() && needs.build.result == 'success'
+    
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 下载所有编译产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: packages-*
+
+      - name: 创建Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.prepare.outputs.version }}
+          release_name: ${{ needs.prepare.outputs.release_name }}
+          body: |
+            ## 插件编译包 ${{ needs.prepare.outputs.version }}
+            
+            **编译时间:** ${{ github.event.head_commit.timestamp }}
+            **提交SHA:** ${{ needs.prepare.outputs.short_sha }}
+            
+            ### 包含的架构
+            - x86_64
+            - aarch64_generic
+            - arm_cortex-a7
+            
+            ### 使用说明
+            1. 下载对应架构的压缩包
+            2. 解压后使用 `opkg install *.ipk` 命令安装
+            3. 或在LuCI界面中通过软件包管理器安装
+            
+            ### 发布说明
+            ${{ github.event.inputs.release_notes || '自动编译的插件包' }}
+          draft: false
+          prerelease: false
+
+      - name: 上传Release资产
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./artifacts/packages-x86_64/packages-x86_64-${{ needs.prepare.outputs.version }}.tar.gz
+          asset_name: packages-x86_64-${{ needs.prepare.outputs.version }}.tar.gz
+          asset_content_type: application/gzip
+
+      - name: 上传aarch64资产
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./artifacts/packages-aarch64_generic/packages-aarch64_generic-${{ needs.prepare.outputs.version }}.tar.gz
+          asset_name: packages-aarch64_generic-${{ needs.prepare.outputs.version }}.tar.gz
+          asset_content_type: application/gzip
+
+      - name: 上传arm_cortex-a7资产
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./artifacts/packages-arm_cortex-a7/packages-arm_cortex-a7-${{ needs.prepare.outputs.version }}.tar.gz
+          asset_name: packages-arm_cortex-a7-${{ needs.prepare.outputs.version }}.tar.gz
+          asset_content_type: application/gzip
+
+  # 错误处理和通知
+  notify:
+    runs-on: ubuntu-latest
+    needs: [prepare, build, release]
+    if: always()
+    
+    steps:
+      - name: 检查工作流状态
+        run: |
+          echo "工作流执行状态报告"
+          echo "=================="
+          echo "准备阶段: ${{ needs.prepare.result }}"
+          echo "编译阶段: ${{ needs.build.result }}"
+          echo "发布阶段: ${{ needs.release.result }}"
+          
+          if [ "${{ needs.build.result }}" == "failure" ]; then
+            echo "❌ 编译失败，请检查编译日志"
+            exit 1
+          elif [ "${{ needs.release.result }}" == "failure" ]; then
+            echo "❌ 发布失败，请检查发布日志"
+            exit 1
+          else
+            echo "✅ 工作流执行成功"
+          fi
+
+      - name: 发送成功通知
+        if: success()
+        run: |
+          echo "✅ 插件编译和发布成功"
+          echo "版本号: ${{ needs.prepare.outputs.version }}"
+          echo "发布地址: https://github.com/${{ github.repository }}/releases/tag/${{ needs.prepare.outputs.version }}"
+
+      - name: 发送失败通知
+        if: failure()
+        run: |
+          echo "❌ 插件编译或发布失败"
+          echo "请检查GitHub Actions日志以获取详细信息"
+          echo "工作流运行地址: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+# 工作流说明：
+# 1. 触发方式：
+#    - main分支的push事件（排除.github目录和markdown文件的变更）
+#    - 手动触发，支持自定义版本号和发布说明
+# 
+# 2. 编译流程：
+#    - 准备阶段：生成版本号（基于语义化版本控制和提交SHA）
+#    - 编译阶段：并行编译多个架构（x86_64, aarch64, arm_cortex-a7）
+#    - 发布阶段：创建GitHub Release并上传编译产物
+#    - 通知阶段：报告工作流执行状态
+#
+# 3. 错误处理：
+#    - 每个步骤都有明确的错误检查
+#    - 编译失败会立即停止并报告
+#    - 通知步骤会报告详细的执行状态
+#
+# 4. 产物管理：
+#    - 编译产物保存为Artifact（保留30天）
+#    - 同时创建GitHub Release并上传资产
+#    - 提供SHA256校验文件
+#
+# 5. 版本号策略：
+#    - 自动：v1.0.<commit_count>-<short_sha>
+#    - 手动：通过workflow_dispatch输入
