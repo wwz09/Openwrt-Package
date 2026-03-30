@@ -1,9 +1,9 @@
 name: 同步上游仓库
 
 on:
-  # 定期触发，每周执行一次
+  # 定期触发，每天执行一次
   schedule:
-    - cron: '0 0 * * 0'  # 每周日0点执行
+    - cron: '0 1 * * *'  # 每天凌晨1点执行
   # 手动触发
   workflow_dispatch:
 
@@ -11,12 +11,10 @@ permissions:
   contents: write
   pull-requests: write
 
-
-
 jobs:
-  sync-repository:
+  sync-repositories:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     
     steps:
       # 检出当前仓库
@@ -31,39 +29,76 @@ jobs:
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
+          echo "Git配置完成"
 
-      # 检查目标仓库更新
-      - name: 检查目标仓库更新
-        id: check-update
+      # 检查 openwrt-packages 仓库更新
+      - name: 检查 openwrt-packages 仓库更新
+        id: check-openwrt-packages
         run: |
           # 尝试获取目标仓库的最新提交
-          TARGET_REPO="https://github.com/kenzok8/jell.git"
-          TARGET_BRANCH="main"
+          TARGET_REPO="https://github.com/kenzok8/openwrt-packages.git"
           
           # 清理并克隆目标仓库到临时目录
-          rm -rf temp_target_repo
-          git clone --depth 1 $TARGET_REPO temp_target_repo
-          cd temp_target_repo
+          rm -rf temp_openwrt_packages
+          git clone --depth 1 $TARGET_REPO temp_openwrt_packages
+          cd temp_openwrt_packages
           
           # 获取目标仓库的最新提交哈希
           TARGET_LAST_COMMIT=$(git rev-parse HEAD)
-          echo "目标仓库最新提交: $TARGET_LAST_COMMIT"
+          echo "openwrt-packages 最新提交: $TARGET_LAST_COMMIT"
           
           # 检查本地是否已有同步记录
           if [ -f ../.sync_history ]; then
-            LAST_SYNCED_COMMIT=$(cat ../.sync_history)
+            LAST_SYNCED_COMMIT=$(grep "OPENWRT_PACKAGES_COMMIT=" ../.sync_history | cut -d'=' -f2)
             echo "上次同步的提交: $LAST_SYNCED_COMMIT"
             
             if [ "$TARGET_LAST_COMMIT" == "$LAST_SYNCED_COMMIT" ]; then
-              echo "目标仓库无更新，跳过同步"
+              echo "openwrt-packages 无更新，跳过同步"
               echo "has_update=false" >> $GITHUB_OUTPUT
             else
-              echo "检测到目标仓库有更新，开始同步"
+              echo "检测到 openwrt-packages 有更新，开始同步"
               echo "has_update=true" >> $GITHUB_OUTPUT
               echo "target_commit=$TARGET_LAST_COMMIT" >> $GITHUB_OUTPUT
             fi
           else
-            echo "首次同步，开始同步目标仓库"
+            echo "首次同步，开始同步 openwrt-packages"
+            echo "has_update=true" >> $GITHUB_OUTPUT
+            echo "target_commit=$TARGET_LAST_COMMIT" >> $GITHUB_OUTPUT
+          fi
+          
+          cd ..
+
+      # 检查 small 仓库更新
+      - name: 检查 small 仓库更新
+        id: check-small
+        run: |
+          # 尝试获取目标仓库的最新提交
+          TARGET_REPO="https://github.com/kenzok8/small.git"
+          
+          # 清理并克隆目标仓库到临时目录
+          rm -rf temp_small
+          git clone --depth 1 $TARGET_REPO temp_small
+          cd temp_small
+          
+          # 获取目标仓库的最新提交哈希
+          TARGET_LAST_COMMIT=$(git rev-parse HEAD)
+          echo "small 最新提交: $TARGET_LAST_COMMIT"
+          
+          # 检查本地是否已有同步记录
+          if [ -f ../.sync_history ]; then
+            LAST_SYNCED_COMMIT=$(grep "SMALL_COMMIT=" ../.sync_history | cut -d'=' -f2)
+            echo "上次同步的提交: $LAST_SYNCED_COMMIT"
+            
+            if [ "$TARGET_LAST_COMMIT" == "$LAST_SYNCED_COMMIT" ]; then
+              echo "small 无更新，跳过同步"
+              echo "has_update=false" >> $GITHUB_OUTPUT
+            else
+              echo "检测到 small 有更新，开始同步"
+              echo "has_update=true" >> $GITHUB_OUTPUT
+              echo "target_commit=$TARGET_LAST_COMMIT" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "首次同步，开始同步 small"
             echo "has_update=true" >> $GITHUB_OUTPUT
             echo "target_commit=$TARGET_LAST_COMMIT" >> $GITHUB_OUTPUT
           fi
@@ -72,40 +107,91 @@ jobs:
 
       # 同步目标仓库内容
       - name: 同步目标仓库内容
-        if: steps.check-update.outputs.has_update == 'true'
+        if: steps.check-openwrt-packages.outputs.has_update == 'true' || steps.check-small.outputs.has_update == 'true'
         run: |
-          TARGET_REPO="https://github.com/kenzok8/jell.git"
-          TARGET_BRANCH="main"
-          
           # 清空当前目录除了.git和.github的内容
-          # 先删除所有文件
+          # 先删除所有文件（保留.git、.github和.sync_history）
           find . -type f -not -path "./.git/*" -not -path "./.github/*" -not -name ".sync_history" -exec rm -f {} \;
-          # 再删除所有空目录
+          # 再删除所有空目录（保留.git和.github）
           find . -type d -not -path "./.git" -not -path "./.github" -not -path "./.git/*" -not -path "./.github/*" -empty -delete
           echo "目录清理完成"
           
-          # 克隆目标仓库内容到临时目录，然后移动到当前目录
-          TEMP_CLONE_DIR="temp_clone"
-          rm -rf $TEMP_CLONE_DIR || true
-          git clone --depth 1 $TARGET_REPO $TEMP_CLONE_DIR
+          # 同步 openwrt-packages 仓库
+          if [ "${{ steps.check-openwrt-packages.outputs.has_update }}" == "true" ]; then
+            TARGET_REPO="https://github.com/kenzok8/openwrt-packages.git"
+            TEMP_CLONE_DIR="temp_openwrt_packages"
+            
+            # 克隆目标仓库
+            git clone $TARGET_REPO $TEMP_CLONE_DIR
+            echo "openwrt-packages 仓库克隆完成"
+            
+            # 获取最新提交信息
+            cd $TEMP_CLONE_DIR
+            OPENWRT_PACKAGES_COMMIT=$(git rev-parse HEAD)
+            OPENWRT_PACKAGES_COMMIT_MSG=$(git log -1 --pretty=%B)
+            cd ..
+            
+            # 将临时目录中的内容移动到当前目录
+            mv $TEMP_CLONE_DIR/* . 2>/dev/null || true
+            mv $TEMP_CLONE_DIR/.* . 2>/dev/null || true
+            echo "openwrt-packages 内容移动完成"
+            
+            # 清理临时目录
+            rm -rf $TEMP_CLONE_DIR || true
+            echo "openwrt-packages 临时目录清理完成"
+            
+            # 记录 openwrt-packages 同步信息
+            echo "OPENWRT_PACKAGES_COMMIT=$OPENWRT_PACKAGES_COMMIT" > .sync_history
+            echo "OPENWRT_PACKAGES_COMMIT_MSG=$OPENWRT_PACKAGES_COMMIT_MSG" >> .sync_history
+          fi
           
-          # 将临时目录中的内容移动到当前目录
-          mv $TEMP_CLONE_DIR/* . 2>/dev/null || true
-          mv $TEMP_CLONE_DIR/.* . 2>/dev/null || true
+          # 同步 small 仓库
+          if [ "${{ steps.check-small.outputs.has_update }}" == "true" ]; then
+            TARGET_REPO="https://github.com/kenzok8/small.git"
+            SMALL_DIR="small"
+            TEMP_CLONE_DIR="temp_small"
+            
+            # 清理临时目录和目标目录
+            rm -rf $TEMP_CLONE_DIR || true
+            rm -rf $SMALL_DIR || true
+            mkdir -p $SMALL_DIR
+            
+            # 克隆目标仓库
+            git clone $TARGET_REPO $TEMP_CLONE_DIR
+            echo "small 仓库克隆完成"
+            
+            # 获取最新提交信息
+            cd $TEMP_CLONE_DIR
+            SMALL_COMMIT=$(git rev-parse HEAD)
+            SMALL_COMMIT_MSG=$(git log -1 --pretty=%B)
+            cd ..
+            
+            # 将临时目录中的内容移动到 small 目录
+            mv $TEMP_CLONE_DIR/* $SMALL_DIR/ 2>/dev/null || true
+            mv $TEMP_CLONE_DIR/.* $SMALL_DIR/ 2>/dev/null || true
+            echo "small 内容移动完成"
+            
+            # 清理临时目录
+            rm -rf $TEMP_CLONE_DIR || true
+            echo "small 临时目录清理完成"
+            
+            # 记录 small 同步信息
+            if [ -f .sync_history ]; then
+              echo "SMALL_COMMIT=$SMALL_COMMIT" >> .sync_history
+              echo "SMALL_COMMIT_MSG=$SMALL_COMMIT_MSG" >> .sync_history
+            else
+              echo "SMALL_COMMIT=$SMALL_COMMIT" > .sync_history
+              echo "SMALL_COMMIT_MSG=$SMALL_COMMIT_MSG" >> .sync_history
+            fi
+          fi
           
-          # 清理临时目录
-          rm -rf $TEMP_CLONE_DIR || true
-          echo "仓库内容同步完成"
-          
-          # 保留.git和.github目录
-          git checkout HEAD -- .gitignore || true
-          
-          # 记录本次同步的提交哈希
-          echo "${{ steps.check-update.outputs.target_commit }}" > .sync_history
+          # 记录同步时间
+          echo "SYNC_TIME=$(date '+%Y-%m-%d %H:%M:%S')" >> .sync_history
+          echo "同步完成"
 
       # 推送更新到远程仓库
       - name: 推送更新到远程仓库
-        if: steps.check-update.outputs.has_update == 'true'
+        if: steps.check-openwrt-packages.outputs.has_update == 'true' || steps.check-small.outputs.has_update == 'true'
         run: |
           # 检查是否有变更
           if git status --porcelain | grep -q .; then
@@ -113,7 +199,7 @@ jobs:
             git add .
             
             # 提交变更
-            git commit -m "Sync with kenzok8/jell at ${{ steps.check-update.outputs.target_commit }}"
+            git commit -m "Auto sync: kenzok8/openwrt-packages and kenzok8/small"
             
             # 推送变更
             git push origin main
@@ -127,25 +213,29 @@ jobs:
         if: failure()
         run: |
           echo "同步过程中出现错误，记录详细日志"
-          # 这里可以添加更多错误处理逻辑，例如发送通知等
+          # 记录错误信息到同步历史
+          echo "SYNC_ERROR=$(date '+%Y-%m-%d %H:%M:%S')" >> .sync_history
+          echo "错误处理完成"
 
       # 清理临时文件
       - name: 清理临时文件
         run: |
           # 使用强制递归删除整个临时目录
-          rm -rf temp_target_repo 2>/dev/null || true
+          rm -rf temp_openwrt_packages 2>/dev/null || true
+          rm -rf temp_small 2>/dev/null || true
           echo "临时目录清理完成"
 
 # 工作流配置说明：
-# 1. 触发方式：每周自动执行一次，同时支持手动触发
+# 1. 触发方式：每天自动执行一次，同时支持手动触发
 # 2. 同步逻辑：
-#    - 检查目标仓库的最新提交
+#    - 检查 openwrt-packages 仓库的最新提交
+#    - 检查 small 仓库的最新提交
 #    - 与上次同步的提交进行比较
 #    - 如有更新，清空当前目录并克隆目标仓库内容
-#    - 记录本次同步的提交哈希
+#    - 记录本次同步的提交哈希和同步时间
 #    - 推送更新到远程仓库
 # 3. 错误处理：当同步过程中出现错误时，记录详细日志
 # 4. 配置选项：
 #    - 可以修改cron表达式调整同步频率
-#    - 可以修改TARGET_REPO和TARGET_BRANCH变量指定目标仓库和分支
 #    - 可以添加额外的部署步骤在同步后执行
+#    - 可以添加通知机制在同步完成或失败时发送通知
